@@ -1,0 +1,579 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "AWS CloudFormation template for creating AWS resources to support the scheduled stop/start automation of Neptune clusters and associated resources."
+
+Parameters:
+  StopScheduleExpression:
+    Description: "A cron expression for stopping Neptune resources"
+    Default: "cron(0 20 ? * MON-FRI *)"
+    Type: "String"
+  
+  StartScheduleExpression:
+    Description: "A cron expression for starting Neptune resources"
+    Default: "cron(0 8 ? * MON-FRI *)"
+    Type: "String"
+  
+  TagKey:
+    Description: "The tag key used to identify resources to auto stop/start"
+    Default: "Environment"
+    Type: "String"
+
+  TagValues:
+    Description: "Comma-separated list of tag key values used to identify which Neptune resources to auto stop/start"
+    Default: "Dev,development,dev,DEV"
+    Type: "String"
+  
+  NotificationEmailAddress:
+    Description: "The email address to receive stop/start notifications"
+    Type: String
+
+  NotifyOnInvalidState:
+    Description: "Set to 'Yes' to send notification if the resource is an non-processable state, otherwise set to 'No'."
+    Type: String
+    Default: "Yes"
+    AllowedValues:
+      - "Yes"
+      - "No"
+
+Resources:
+  LambdaStartStopManagementRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: "LambdaStartStopManagementRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: 
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+  
+  LambdaStartStopManagementPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: "LambdaStartStopManagementPolicy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: 
+              - "logs:CreateLogGroup"
+              - "logs:CreateLogStream"
+              - "logs:PutLogEvents"
+              - "tag:GetResources"
+              - "tag:GetTagValues"
+              - "tag:TagResources"
+              - "tag:GetTagKeys"
+              - "ssm:GetParameter"
+              - "rds:StartDBCluster"
+              - "rds:StopDBCluster"
+              - "rds:DescribeDBClusters"
+              - "sns:Publish"
+              - "sagemaker:DescribeNotebookInstance"
+              - "sagemaker:StopNotebookInstance"
+              - "sagemaker:StartNotebookInstance"
+              - "ec2:DescribeSubnets"
+              - "ec2:DescribeVpcs"
+              - "ec2:DescribeNetworkInterfaces"
+            Resource: "*"
+      Roles:
+        - !Ref LambdaStartStopManagementRole
+
+  SSMTagKeyParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Description: "The parameter used to store the tag key used to filter for applicable Neptune-related resources"
+      Name: "/rds/stop_start/tag_key"
+      Type: "String"
+      Value: !Ref TagKey
+
+  SSMTagValuesParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Description: "The parameter used to store the tag values used to filter for applicable Neptune-related resources"
+      Name: "/rds/stop_start/tag_values"
+      Type: "StringList"
+      Value: !Ref TagValues
+
+  SSMNotifyOnInvalidStateParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Description: "The parameter used to determine if notifications should be generated if a resource is in the incorrect state for processing"
+      Name: "/rds/stop_start/notify_on_invalid_state"
+      Type: "String"
+      Value: !Ref NotifyOnInvalidState
+
+  StopEventBridgeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "Schedules the stop event for Neptune clusters"
+      State: "ENABLED"
+      ScheduleExpression: !Ref StopScheduleExpression
+      Targets:
+        - Arn: !Ref StopSNSTopic
+          Id: StopNeptuneClusters
+
+  StartEventBridgeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "Schedules the start event for Neptune clusters"
+      State: "ENABLED"
+      ScheduleExpression: !Ref StartScheduleExpression
+      Targets:
+        - Arn: !Ref "StartSNSTopic"
+          Id: StartNeptuneClusters
+
+  StopLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties: 
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt StopLambdaFunction.Arn
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref StopSNSTopic
+
+  StartLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties: 
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt StartLambdaFunction.Arn
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref StartSNSTopic
+
+  StopSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: "Neptune Stop DB Clusters Notification"
+      TopicName: Neptune-Stop-DBClusters-Topic
+      Subscription:
+        - Endpoint: !GetAtt StopLambdaFunction.Arn
+          Protocol: "LAMBDA"
+
+  StartSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: "Neptune Start DB Clusters Notification"
+      TopicName: Neptune-Start-DBClusters-Topic
+      Subscription:
+        - Endpoint: !GetAtt StartLambdaFunction.Arn
+          Protocol: "LAMBDA"
+
+  NotificationSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: "Neptune Stop-Start Notification"
+      TopicName: Neptune-StopStart-Notification-Topic
+      Subscription:
+        - Endpoint: !Ref NotificationEmailAddress
+          Protocol: "EMAIL"
+
+  StopLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: "neptune-Stop-DBClusters"
+      Runtime: "nodejs14.x"
+      Handler: "index.handler"
+      Description: "Identifies Neptune clusters and resources by tag key and value and stops them."
+      Timeout: 30
+      Environment:
+        Variables:
+          TagKeyParameterStore: "/rds/stop_start/tag_key"
+          TagValueParameterStore: "/rds/stop_start/tag_values"
+          NotifyOnInvalidStateParameterStore: "/rds/stop_start/notify_on_invalid_state"
+          NotifySNSTopicArn: !Ref "NotificationSNSTopic"
+      Role: 
+        Fn::GetAtt: 
+          - "LambdaStartStopManagementRole"
+          - "Arn"
+      Code:
+        ZipFile: |
+          const AWS = require('aws-sdk');
+          const neptuneAPI = new AWS.Neptune();
+          const tagAPI = new AWS.ResourceGroupsTaggingAPI();
+          const ssmAPI = new AWS.SSM();
+          const snsAPI = new AWS.SNS();
+          const sagemakerAPI = new AWS.SageMaker();
+
+          exports.handler = async (event) => {
+              const notifySNSTopic = process.env.NotifySNSTopicArn;
+                
+              const ssmParamKey = {
+                  Name: process.env.TagKeyParameterStore
+              };
+              const ssmParamValue = {
+                  Name: process.env.TagValueParameterStore
+              };
+              const ssmNotifyParam = {
+                  Name: process.env.NotifyOnInvalidStateParameterStore
+              };
+              
+              var tagKeyRequest = await ssmAPI.getParameter(ssmParamKey).promise();
+              const tagKey = tagKeyRequest.Parameter.Value;
+              
+              var tagValueRequest = await ssmAPI.getParameter(ssmParamValue).promise();
+              const tagValue = tagValueRequest.Parameter.Value.split(',');
+              
+              var notifyOnInvalidStateRequest = await ssmAPI.getParameter(ssmNotifyParam).promise();
+              const notifyOnInvalidState = ((notifyOnInvalidStateRequest.Parameter.Value || 'Yes') == 'Yes' ? true : false);
+              
+              const requestParams = {
+                  "TagFilters": [
+                      {
+                          "Key": tagKey,
+                          "Values": tagValue
+                      }
+                  ]
+              };
+              
+              var resourcesRequest = await tagAPI.getResources(requestParams).promise();
+              const resourcesFound = resourcesRequest.ResourceTagMappingList;
+              const resources = [];
+              
+              resourcesFound.forEach(e => {
+                  var arnParts = e.ResourceARN.split(':');
+                  // 2 = resource type
+                  // 5 = resource sub-type
+                  
+                  var o = {
+                      Type: arnParts[2],
+                      SubType: arnParts[5].split('/')[0],
+                      Name: arnParts[5].split('/')[1] || '',
+                      Arn: e.ResourceARN
+                  };
+                  resources.push(o);
+              });
+              
+              // process the resources based on their type
+              // neptune clusters
+              const neptuneResponse = await stopNeptuneResources(resources.filter(e => e.Type === 'rds' && e.SubType === 'cluster'), notifyOnInvalidState);
+              var neptuneMessage = neptuneResponse;
+              
+              // sagemaker notebook instances
+              const sgResponse = await stopSagemakerResources(resources.filter(e => e.Type === 'sagemaker' && e.SubType === 'notebook-instance'), notifyOnInvalidState);
+              var sgMessage = sgResponse;
+
+              // define message contents
+              var message = '';
+              
+              if (neptuneMessage.length > 0)
+                  message += `Neptune Clusters:\n${neptuneMessage.join('\n')}\n\n`;
+                  
+              if (sgMessage.length > 0)
+                  message += `Sagemaker Instances:\n${sgMessage.join('\n')}\n\n`;
+              
+              if (message.length == 0)
+                  message = 'Stop process completed successfully.\nNote, if messages have been switched off for resources that are an invalid state, they will not appear in this notification.';
+                  
+              // send notification
+              await sendSNSNotification(notifySNSTopic, message);
+          };
+
+          const sendSNSNotification = async (topic, message) =>  {
+              if (topic)
+              {
+                  var messageParams = {
+                      TopicArn: topic,
+                      Message: `Notification of automated Neptune cluster and associated resource STOP process:\n\n${message}`
+                  };
+                  
+                  await snsAPI.publish(messageParams).promise();
+              }
+          };
+
+          const stopNeptuneResources = async (resources, notifyOnInvalidStateFlag) => {
+              const resourceArns = [];
+              const response = [];
+              
+              resources.forEach(e => {
+                resourceArns.push(e.Arn);
+              });
+              
+              const filterParams = {
+                  Filters: [
+                      {
+                          Name: "db-cluster-id",
+                          Values: resourceArns
+                      }
+                  ]
+              };
+              
+              const dbClusters = await neptuneAPI.describeDBClusters(filterParams).promise();
+              const validStatuses = ['available'];
+              
+              for (var i=0; i<dbClusters.DBClusters.length; i++) {
+                  var c = dbClusters.DBClusters[i];
+
+                  var clusterParams = {
+                          DBClusterIdentifier: c.DBClusterIdentifier
+                      };
+                      
+                      // only stop clusters that have a 'startable' status
+                      if (validStatuses.includes(c.Status)) {
+                          try {
+                              var r = await neptuneAPI.stopDBCluster(clusterParams).promise();
+                              console.log(r);
+                              if (r) {
+                                  response.push(`Successfully initiated stop request on Amazon Neptune cluster: "${c.DBClusterIdentifier}"`);
+                              }
+                              else {
+                                  response.push(`Failed to initiate stop request on Amazon Neptune cluster: "${c.DBClusterIdentifier}"`);
+                              }
+                          }
+                          catch (e) {
+                              response.push(`Unable to stop cluster "${c.DBClusterIdentifier} due to error: ${e}`);
+                          }
+                      }   
+                      else {
+                          if (notifyOnInvalidStateFlag)
+                              response.push(`Unable to stop Amazon Neptune cluster "${c.DBClusterIdentifier}" as it is currently in an invalid state of "${c.Status}".`);
+                      }
+              }
+              
+              return response;
+          };
+
+          const stopSagemakerResources = async (resources, notifyOnInvalidStateFlag) => {
+              
+              const validStatuses = ['InService'];
+              const response = [];
+              
+              for (var i=0; i<resources.length; i++) {
+                  
+                  const e = resources[i];
+              
+                  var params = {
+                      NotebookInstanceName: e.Name
+                  };
+
+                  try {
+                      const describeInstance = await sagemakerAPI.describeNotebookInstance(params).promise();
+                      
+                      if (validStatuses.includes(describeInstance.NotebookInstanceStatus)) {
+                          sagemakerAPI.stopNotebookInstance(params, function(err, data) {
+                              if (err) {
+                                  response.push(`Failed to stop notebook instance ${e.Name} due to error: ${err}`);
+                              }
+                              else {
+                                  response.push(`Successfully stopped notebook instance "${e.Name}".`);
+                              }
+                          });
+                      }
+                      else {
+                          if (notifyOnInvalidStateFlag)
+                              response.push(`Unable to stop Amazon SageMaker Notebook instance "${e.Name}" as it is currently in an invalid state of "${describeInstance.NotebookInstanceStatus}".`);
+                      }
+                  }
+                  catch (e) {
+                      response.push(`Failed processing Amazon SageMaker Notebook instance "${e.Name}": ${e}`);
+                  }
+              }
+              
+              return response;
+          };
+
+  
+  StartLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: "neptune-Start-DbClusters"
+      Runtime: "nodejs14.x"
+      Handler: "index.handler"
+      Description: "Identifies Neptune clusters and resources by tag key and value and starts them."
+      Timeout: 30
+      Environment:
+        Variables:
+          TagKeyParameterStore: "/rds/stop_start/tag_key"
+          TagValueParameterStore: "/rds/stop_start/tag_values"
+          NotifyOnInvalidStateParameterStore: "/rds/stop_start/notify_on_invalid_state"
+          NotifySNSTopicArn: !Ref "NotificationSNSTopic"
+      Role: 
+        Fn::GetAtt: 
+          - "LambdaStartStopManagementRole"
+          - "Arn"
+      Code:
+        ZipFile: |
+          const AWS = require('aws-sdk');
+          const neptuneAPI = new AWS.Neptune();
+          const tagAPI = new AWS.ResourceGroupsTaggingAPI();
+          const ssmAPI = new AWS.SSM();
+          const snsAPI = new AWS.SNS();
+          const sagemakerAPI = new AWS.SageMaker();
+
+          exports.handler = async (event) => {
+              const notifySNSTopic = process.env.NotifySNSTopicArn;
+                
+              const ssmParamKey = {
+                  Name: process.env.TagKeyParameterStore
+              };
+              const ssmParamValue = {
+                  Name: process.env.TagValueParameterStore
+              };
+              const ssmNotifyParam = {
+                  Name: process.env.NotifyOnInvalidStateParameterStore
+              };
+              
+              var tagKeyRequest = await ssmAPI.getParameter(ssmParamKey).promise();
+              const tagKey = tagKeyRequest.Parameter.Value;
+              
+              var tagValueRequest = await ssmAPI.getParameter(ssmParamValue).promise();
+              const tagValue = tagValueRequest.Parameter.Value.split(',');
+              
+              var notifyOnInvalidStateRequest = await ssmAPI.getParameter(ssmNotifyParam).promise();
+              const notifyOnInvalidState = ((notifyOnInvalidStateRequest.Parameter.Value || 'Yes').toLowerCase() === 'yes' ? true : false);
+              
+              const requestParams = {
+                  "TagFilters": [
+                      {
+                          "Key": tagKey,
+                          "Values": tagValue
+                      }
+                  ]
+              };
+              
+              var resourcesRequest = await tagAPI.getResources(requestParams).promise();
+              const resourcesFound = resourcesRequest.ResourceTagMappingList;
+              const resources = [];
+              
+              resourcesFound.forEach(e => {
+                  var arnParts = e.ResourceARN.split(':');
+                  // 2 = resource type
+                  // 5 = resource sub-type
+                  
+                  var o = {
+                      Type: arnParts[2],
+                      SubType: arnParts[5].split('/')[0],
+                      Name: arnParts[5].split('/')[1] || '',
+                      Arn: e.ResourceARN
+                  };
+                  resources.push(o);
+              });
+              
+              // process the resources based on their type
+              // neptune clusters
+              const neptuneResponse = await startNeptuneResources(resources.filter(e => e.Type === 'rds' && e.SubType === 'cluster'), notifyOnInvalidState);
+              var neptuneMessage = neptuneResponse;
+              
+              // sagemaker notebook instances
+              const sgResponse = await startSagemakerResources(resources.filter(e => e.Type === 'sagemaker' && e.SubType === 'notebook-instance'), notifyOnInvalidState);
+              var sgMessage = sgResponse;
+              
+              // define message contents
+              var message = '';
+              
+              if (neptuneMessage.length > 0)
+                  message += `Neptune Clusters:\n${neptuneMessage.join('\n')}\n\n`;
+                  
+              if (sgMessage.length > 0)
+                  message += `Sagemaker Instances:\n${sgMessage.join('\n')}\n\n`;
+              
+              if (message.length == 0)
+                  message = 'Start process completed successfully.\nNote, if messages have been switched off for resources that are an invalid state, they will not appear in this notification.';
+
+              // send notification
+              await sendSNSNotification(notifySNSTopic, message);
+          };
+
+          const sendSNSNotification = async (topic, message) =>  {
+              if (topic)
+              {
+                  var messageParams = {
+                      TopicArn: topic,
+                      Message: `Notification of automated Neptune cluster and associated resource START process:\n\n${message}`
+                  };
+                  
+                  await snsAPI.publish(messageParams).promise();
+              }
+          };
+
+          const startNeptuneResources = async (resources, notifyOnInvalidStateFlag) => {
+              const resourceArns = [];
+              const response = [];
+              
+              resources.forEach(e => {
+                resourceArns.push(e.Arn);
+              });
+              
+              const filterParams = {
+                  Filters: [
+                      {
+                          Name: "db-cluster-id",
+                          Values: resourceArns
+                      }
+                  ]
+              };
+              
+              const dbClusters = await neptuneAPI.describeDBClusters(filterParams).promise();
+              const validStatuses = ['stopped'];
+              
+              for (var i=0; i<dbClusters.DBClusters.length; i++) {
+                  var c = dbClusters.DBClusters[i];
+
+                  var clusterParams = {
+                          DBClusterIdentifier: c.DBClusterIdentifier
+                      };
+                      
+                      // only stop clusters that have a 'startable' status
+                      if (validStatuses.includes(c.Status)) {
+                          try {
+                              var r = await neptuneAPI.startDBCluster(clusterParams).promise();
+                              
+                              if (r) {
+                                  response.push(`Successfully initiated start request on Amazon Neptune cluster: "${c.DBClusterIdentifier}"`);
+                              }
+                              else {
+                                  response.push(`Failed to initiate start request on Amazon Neptune cluster: "${c.DBClusterIdentifier}"`);
+                              }
+                          }
+                          catch (e) {
+                              response.push(`Unable to start cluster "${c.DBClusterIdentifier} due to error: ${e}`);
+                          }
+                      }   
+                      else {
+                          if (notifyOnInvalidStateFlag)
+                              response.push(`Unable to start Amazon Neptune cluster "${c.DBClusterIdentifier}" as it is currently in an invalid state of "${c.Status}".`);
+                      }
+              }
+              
+              return response;
+          };
+
+          const startSagemakerResources = async (resources, notifyOnInvalidStateFlag) => {
+              
+              const validStatuses = ['Stopped','Failed'];
+              const response = [];
+              
+              for (var i=0; i<resources.length; i++) {
+                  
+                  const e = resources[i];
+              
+                  var params = {
+                      NotebookInstanceName: e.Name
+                  };
+
+                  try {
+                      const describeInstance = await sagemakerAPI.describeNotebookInstance(params).promise();
+                      
+                      if (validStatuses.includes(describeInstance.NotebookInstanceStatus)) {
+                          sagemakerAPI.startNotebookInstance(params, function(err, data) {
+                              if (err) {
+                                  response.push(`Failed to start notebook instance ${e.Name} due to error: ${err}`);
+                              }
+                              else {
+                                  response.push(`Successfully started notebook instance "${e.Name}".`);
+                              }
+                          });
+                      }
+                      else {
+                          if (notifyOnInvalidStateFlag)
+                              response.push(`Unable to start Amazon SageMaker Notebook instance "${e.Name}" as it is currently in an invalid state of "${describeInstance.NotebookInstanceStatus}".`);
+                      }
+                  }
+                  catch (e) {
+                      response.push(`Failed processing Amazon SageMaker Notebook instance "${e.Name}": ${e}`);
+                  }
+              }
+              
+              return response;
+          };
+
+
