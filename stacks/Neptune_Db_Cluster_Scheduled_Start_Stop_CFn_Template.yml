@@ -1,3 +1,5 @@
+# NON PRODUCTION - SAMPLE TEMPLATE - EDUCATIONAL PURPOSES ONLY 
+
 AWSTemplateFormatVersion: "2010-09-09"
 Description: "AWS CloudFormation template for creating AWS resources to support the scheduled stop/start automation of Neptune clusters and associated resources."
 

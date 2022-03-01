@@ -1,0 +1,7 @@
+# NON PRODUCTION - SAMPLE TEMPLATE - EDUCATIONAL PURPOSES ONLY 
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "AWS CloudFormation template for creating AWS resources to build the initial Amazon Neptune environment."
+
+Parameters:
+  
