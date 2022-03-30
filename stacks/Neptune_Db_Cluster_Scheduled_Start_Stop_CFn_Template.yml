@@ -3,6 +3,17 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: "AWS CloudFormation template for creating AWS resources to support the scheduled stop/start automation of Neptune clusters and associated resources."
 
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label:
+          default: "Scheduling Triggers"
+          Parameters:
+            - StartScheduleExpression
+            - StopScheduleExpression
+      
+
 Parameters:
   StopScheduleExpression:
     Description: "A cron expression for stopping Neptune resources"
@@ -35,6 +46,19 @@ Parameters:
     AllowedValues:
       - "Yes"
       - "No"
+
+  CreateExampleNeptuneEnvironment:
+    Description: "Set to 'Yes' to create an Amazon Neptune database cluster and Amazon SageMaker notebook for testing purposes, otherwise set to 'No'."
+    Type: String
+    Default: "No"
+    AllowedValues:
+      - "Yes"
+      - "No"
+
+Conditions:
+  CreateNeptuneResources: !Equals
+    - !Ref CreateExampleNeptuneEnvironment
+    - "Yes"
 
 Resources:
   LambdaStartStopManagementRole:
@@ -146,7 +170,7 @@ Resources:
     Type: AWS::SNS::Topic
     Properties:
       DisplayName: "Neptune Stop DB Clusters Notification"
-      TopicName: Neptune-Stop-DBClusters-Topic
+      TopicName: "Neptune-Stop-DBClusters-Topic"
       Subscription:
         - Endpoint: !GetAtt StopLambdaFunction.Arn
           Protocol: "LAMBDA"
@@ -155,7 +179,7 @@ Resources:
     Type: AWS::SNS::Topic
     Properties:
       DisplayName: "Neptune Start DB Clusters Notification"
-      TopicName: Neptune-Start-DBClusters-Topic
+      TopicName: "Neptune-Start-DBClusters-Topic"
       Subscription:
         - Endpoint: !GetAtt StartLambdaFunction.Arn
           Protocol: "LAMBDA"
@@ -164,7 +188,7 @@ Resources:
     Type: AWS::SNS::Topic
     Properties:
       DisplayName: "Neptune Stop-Start Notification"
-      TopicName: Neptune-StopStart-Notification-Topic
+      TopicName: "Neptune-StopStart-Notification-Topic"
       Subscription:
         - Endpoint: !Ref NotificationEmailAddress
           Protocol: "EMAIL"
@@ -578,4 +602,13 @@ Resources:
               return response;
           };
 
+  NeptuneDbInstance:
+    Type: AWS::Neptune::DBInstance
+    Condition: CreateNeptuneResources
+    Properties:
+      DBInstanceClass: "db.t3.medium"
+      Tags: 
+        - Key: !Ref TagKey
+          # use the first given tag value in the stack
+          Value: !Select [0, !Split [ ",", !Ref TagValues ]]
 

@@ -4,4 +4,12 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: "AWS CloudFormation template for creating AWS resources to build the initial Amazon Neptune environment."
 
 Parameters:
+  DbClusterName:
+    Description: "The database cluster identifier"
+    Default: "database-1"
+    Type: "String"
+
+  Db
+
+  https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-neptune-dbcluster.html
   
