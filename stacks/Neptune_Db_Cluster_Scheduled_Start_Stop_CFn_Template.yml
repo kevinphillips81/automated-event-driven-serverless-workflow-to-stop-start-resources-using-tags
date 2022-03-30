@@ -602,11 +602,23 @@ Resources:
               return response;
           };
 
+  
+  NeptuneDbCluster:
+    Type: AWS::Neptune::DBCluster
+    Condition: CreateNeptuneResources
+    Properties:
+      DBClusterIdentifier: "neptune-start-stop-test-db-cluster"
+      Tags: 
+        - Key: !Ref TagKey
+          # use the first given tag value in the stack
+          Value: !Select [0, !Split [ ",", !Ref TagValues ]]
+          
   NeptuneDbInstance:
     Type: AWS::Neptune::DBInstance
     Condition: CreateNeptuneResources
     Properties:
-      DBInstanceClass: "db.t3.medium"
+      DBInstanceClass: db.t3.medium
+      DBClusterIdentifier: !Ref NeptuneDbCluster
       Tags: 
         - Key: !Ref TagKey
           # use the first given tag value in the stack
