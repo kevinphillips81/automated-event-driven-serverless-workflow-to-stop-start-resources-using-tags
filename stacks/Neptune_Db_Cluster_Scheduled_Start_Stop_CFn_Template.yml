@@ -624,3 +624,33 @@ Resources:
           # use the first given tag value in the stack
           Value: !Select [0, !Split [ ",", !Ref TagValues ]]
 
+  NotebookExecutionRole:
+    Type: "AWS::IAM::Role"
+    Condition: CreateNeptuneResources
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+          - 
+            Effect: "Allow"
+            Principal: 
+              Service: 
+                - "sagemaker.amazonaws.com"
+            Action: 
+              - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSageMakerFullAccess"
+
+  NeptuneNotebookInstance:
+    Type: AWS::SageMaker::NotebookInstance
+    Condition: CreateNeptuneResources
+    Properties:
+      NotebookInstanceName: "aws-neptune-start-stop-notebook"
+      DirectInternetAccess: "Enabled"
+      InstanceType: "ml.t2.medium"
+      RoleArn: !GetAtt NotebookExecutionRole.Arn
+      Tags:
+        - Key: !Ref TagKey
+          Value: !Select [0, !Split [ ",", !Ref TagValues ]]
+
